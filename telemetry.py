@@ -1,44 +1,72 @@
 import irsdk
+import time
 
 class TelemetryMonitor:
     def __init__(self):
         self.ir = irsdk.IRSDK()
         self.ir.startup()
-        self.last_incident_counts = {}
-        self.player_car_idx = self.ir['PlayerCarIdx']
+        self.last_track_surfaces = {}
+        self.last_speed = {}
+        self.player_idx = self.ir['PlayerCarIdx']
+        self.drivers = self.ir['DriverInfo']['Drivers']
 
     def is_connected(self):
         return self.ir.is_connected
 
     def get_new_incidents(self):
         incidents = []
-        for car_idx in range(64):  # max 64 cars in ir race
-            if car_idx == self.player_car_idx:
-                continue
-            try:
-                current_count = self.ir[f'CarIdxIncidentCount'][car_idx]
-                last_count = self.last_incident_counts.get(car_idx, 0)
-                if current_count > last_count:
-                    delta = current_count - last_count
-                    time_stamp = self.ir['SessionTime']
-                    name = self.ir['DriverInfo']['Drivers'][car_idx]['UserName']
-                    type_ = self.get_incident_type(delta)
+        try:
+            surfaces = self.ir['CarIdxTrackSurface']
+            speeds = self.ir['CarIdxEstTime'] if 'CarIdxEstTime' in self.ir.var_headers_names else None
+            session_time = self.ir['SessionTime']
+
+            for driver in self.drivers:
+                idx = driver['CarIdx']
+                if idx == self.player_idx:
+                    continue  # ignore self
+                name = driver['UserName']
+
+                prev_surface = self.last_track_surfaces.get(idx, 3)  # default: on_track
+                prev_speed = self.last_speed.get(idx, 100)  # assume moving
+                curr_surface = surfaces[idx]
+
+                # speed_mps = self.ir['CarIdxRPM'][idx] / 10 if 'CarIdxRPM' in self.ir.var_headers_names else 3000
+                # kmh = speed_mps * 3.6
+
+                try:
+                    vel_x = self.ir['CarIdxLocalVelX'][idx]
+                    vel_y = self.ir['CarIdxLocalVelY'][idx]
+                    vel_z = self.ir['CarIdxLocalVelZ'][idx]
+                    speed_mps = (vel_x ** 2 + vel_y ** 2 + vel_z ** 2) ** 0.5
+                except:
+                    speed_mps = 30  # fallback
+
+                kmh = speed_mps * 3.6
+
+                self.last_track_surfaces[idx] = curr_surface
+                self.last_speed[idx] = kmh
+
+                # OFFTRACK
+                if prev_surface == 3 and curr_surface == 0:
                     incidents.append({
-                        'car_idx': car_idx,
+                        'car_idx': idx,
                         'driver_name': name,
-                        'time': time_stamp,
-                        'type': type_
+                        'time': session_time,
+                        'type': 'Off-track'
                     })
-                    self.last_incident_counts[car_idx] = current_count
-            except:
-                continue
+
+                # CRASH (vitesse très basse + offtrack)
+                if curr_surface != -1 and kmh < 30:
+                    incidents.append({
+                        'car_idx': idx,
+                        'driver_name': name,
+                        'time': session_time,
+                        'type': 'Crash'
+                    })
+        except:
+            pass
+
         return incidents
 
-    def get_incident_type(self, delta):
-        if delta == 1:
-            return 'Off-track'
-        elif delta == 2:
-            return 'Crash'
-        elif delta >= 4:
-            return 'Crash w/ car'
-        return 'Unknown'
+    def get_ir(self):
+        return self.ir
